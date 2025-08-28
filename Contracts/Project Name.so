@@ -1,0 +1,551 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+
+/**
+ * @title SimpleStorage
+ * @dev A comprehensive smart contract for storing and retrieving different data types
+ * @notice This contract demonstrates fundamental blockchain storage capabilities
+ * 
+ * Features:
+ * - Multi-type data storage (strings, numbers, booleans)
+ * - Access control and security measures
+ * - Gas-optimized storage patterns
+ * - Event-driven architecture for transparency
+ * - Educational foundation for blockchain development
+ */
+contract SimpleStorage is Ownable, ReentrancyGuard {
+
+    // ============ STATE VARIABLES ============
+
+    /// @notice Maximum length for stored strings to prevent gas issues
+    uint256 public constant MAX_STRING_LENGTH = 1000;
+    
+    /// @notice Maximum number of data entries per user
+    uint256 public constant MAX_ENTRIES_PER_USER = 100;
+    
+    /// @notice Total number of data entries across all users
+    uint256 public totalEntries;
+
+    // ============ ENUMS ============
+
+    /// @notice Data types supported by the contract
+    enum DataType {
+        STRING,     // Text data
+        NUMBER,     // Numeric data (uint256)
+        BOOLEAN,    // True/false values
+        ADDRESS,    // Ethereum addresses
+        BYTES       // Raw byte data
+    }
+
+    // ============ STRUCTS ============
+
+    /// @notice Structure for storing data with metadata
+    struct DataEntry {
+        string key;             // Unique identifier for the data
+        DataType dataType;      // Type of stored data
+        bytes data;             // Actual data (encoded)
+        address owner;          // Address that stored the data
+        uint256 timestamp;      // When the data was stored
+        bool isActive;          // Whether the data is currently active
+        uint256 version;        // Version number for updates
+    }
+
+    /// @notice User statistics and metadata
+    struct UserStats {
+        uint256 totalEntries;   // Total entries created by user
+        uint256 activeEntries;  // Currently active entries
+        uint256 lastActivity;   // Timestamp of last activity
+        bool isRegistered;      // Whether user has registered
+    }
+
+    // ============ MAPPINGS ============
+
+    /// @notice Mapping from user address and key to data entry
+    mapping(address => mapping(string => DataEntry)) private userStorage;
+    
+    /// @notice Mapping to track all keys used by each user
+    mapping(address => string[]) private userKeys;
+    
+    /// @notice Mapping to track user statistics
+    mapping(address => UserStats) public userStats;
+    
+    /// @notice Mapping to check if a key exists for a user
+    mapping(address => mapping(string => bool)) public keyExists;
+    
+    /// @notice Global mapping for public data (accessible by anyone)
+    mapping(string => DataEntry) public globalStorage;
+    
+    /// @notice Array of all global keys for enumeration
+    string[] public globalKeys;
+
+    // ============ EVENTS ============
+
+    event DataStored(
+        address indexed owner,
+        string indexed key,
+        DataType indexed dataType,
+        uint256 timestamp,
+        bool isGlobal
+    );
+
+    event DataRetrieved(
+        address indexed owner,
+        string indexed key,
+        address indexed requester,
+        uint256 timestamp
+    );
+
+    event DataUpdated(
+        address indexed owner,
+        string indexed key,
+        uint256 oldVersion,
+        uint256 newVersion,
+        uint256 timestamp
+    );
+
+    event DataDeleted(
+        address indexed owner,
+        string indexed key,
+        uint256 timestamp
+    );
+
+    event UserRegistered(
+        address indexed user,
+        uint256 timestamp
+    );
+
+    // ============ ERRORS ============
+
+    error StringTooLong();
+    error KeyNotFound();
+    error KeyAlreadyExists();
+    error MaxEntriesReached();
+    error InvalidDataType();
+    error UnauthorizedAccess();
+    error EmptyKey();
+    error InvalidAddress();
+
+    // ============ MODIFIERS ============
+
+    modifier validKey(string memory key) {
+        if (bytes(key).length == 0) revert EmptyKey();
+        if (bytes(key).length > 64) revert StringTooLong();
+        _;
+    }
+
+    modifier keyExistsForUser(address user, string memory key) {
+        if (!keyExists[user][key]) revert KeyNotFound();
+        _;
+    }
+
+    modifier keyNotExistsForUser(address user, string memory key) {
+        if (keyExists[user][key]) revert KeyAlreadyExists();
+        _;
+    }
+
+    modifier registeredUser() {
+        if (!userStats[msg.sender].isRegistered) {
+            _registerUser(msg.sender);
+        }
+        _;
+    }
+
+    // ============ CONSTRUCTOR ============
+
+    /**
+     * @dev Initialize the Simple Storage contract
+     */
+    constructor() Ownable(msg.sender) {
+        // Register the contract deployer
+        _registerUser(msg.sender);
+    }
+
+    // ============ CORE FUNCTIONS ============
+
+    /**
+     * @dev CORE FUNCTION 1: Store data of different types
+     * @param key Unique identifier for the data
+     * @param data The data to store (encoded as bytes)
+     * @param dataType Type of data being stored
+     * @param isGlobal Whether data should be publicly accessible
+     * 
+     * This function serves as the universal storage mechanism for all data types.
+     * It handles encoding, validation, access control, and event emission.
+     * 
+     * Requirements:
+     * - Key must be valid (not empty, reasonable length)
+     * - Key must not already exist for the user
+     * - User must not exceed maximum entries limit
+     * - Data must be properly encoded for the specified type
+     */
+    function storeData(
+        string memory key,
+        bytes memory data,
+        DataType dataType,
+        bool isGlobal
+    ) external nonReentrant registeredUser validKey(key) {
+        // Check if user has reached maximum entries
+        if (userStats[msg.sender].activeEntries >= MAX_ENTRIES_PER_USER) {
+            revert MaxEntriesReached();
+        }
+
+        // Ensure key doesn't already exist
+        if (keyExists[msg.sender][key]) revert KeyAlreadyExists();
+
+        // Validate data based on type
+        _validateDataByType(data, dataType);
+
+        // Create data entry
+        DataEntry memory entry = DataEntry({
+            key: key,
+            dataType: dataType,
+            data: data,
+            owner: msg.sender,
+            timestamp: block.timestamp,
+            isActive: true,
+            version: 1
+        });
+
+        // Store in user's private storage
+        userStorage[msg.sender][key] = entry;
+        userKeys[msg.sender].push(key);
+        keyExists[msg.sender][key] = true;
+
+        // Store in global storage if requested
+        if (isGlobal) {
+            globalStorage[key] = entry;
+            globalKeys.push(key);
+        }
+
+        // Update statistics
+        userStats[msg.sender].activeEntries++;
+        userStats[msg.sender].totalEntries++;
+        userStats[msg.sender].lastActivity = block.timestamp;
+        totalEntries++;
+
+        emit DataStored(msg.sender, key, dataType, block.timestamp, isGlobal);
+    }
+
+    /**
+     * @dev CORE FUNCTION 2: Retrieve stored data with decoding
+     * @param owner Address of the data owner (use address(0) for global data)
+     * @param key Identifier of the data to retrieve
+     * @return data The stored data as bytes
+     * @return dataType The type of the stored data
+     * @return timestamp When the data was stored
+     * @return version Current version of the data
+     * 
+     * This function provides universal data retrieval with proper access control.
+     * It handles both private user data and global public data.
+     * 
+     * Requirements:
+     * - Key must exist for the specified owner
+     * - Caller must have access rights (owner or public data)
+     * - Data must be currently active
+     */
+    function retrieveData(
+        address owner,
+        string memory key
+    ) external validKey(key) returns (
+        bytes memory data,
+        DataType dataType,
+        uint256 timestamp,
+        uint256 version
+    ) {
+        DataEntry memory entry;
+
+        // Retrieve from global storage if owner is zero address
+        if (owner == address(0)) {
+            entry = globalStorage[key];
+            if (!entry.isActive) revert KeyNotFound();
+        } else {
+            // Check if key exists for the user
+            if (!keyExists[owner][key]) revert KeyNotFound();
+            
+            entry = userStorage[owner][key];
+            
+            // Check access permissions (owner or public data)
+            if (entry.owner != msg.sender && owner != address(0)) {
+                // Only allow access if it's global data
+                if (bytes(globalStorage[key].key).length == 0) {
+                    revert UnauthorizedAccess();
+                }
+            }
+        }
+
+        // Emit retrieval event
+        emit DataRetrieved(entry.owner, key, msg.sender, block.timestamp);
+
+        return (entry.data, entry.dataType, entry.timestamp, entry.version);
+    }
+
+    /**
+     * @dev CORE FUNCTION 3: Update existing data entry
+     * @param key Identifier of the data to update
+     * @param newData New data to store
+     * @param updateGlobal Whether to also update global storage
+     * 
+     * This function allows data owners to update their stored information
+     * while maintaining version control and access permissions.
+     * 
+     * Requirements:
+     * - Key must exist for the caller
+     * - Only data owner can update their data
+     * - New data must be valid for the existing data type
+     */
+    function updateData(
+        string memory key,
+        bytes memory newData,
+        bool updateGlobal
+    ) external nonReentrant registeredUser validKey(key) keyExistsForUser(msg.sender, key) {
+        DataEntry storage entry = userStorage[msg.sender][key];
+        
+        // Validate new data matches existing type
+        _validateDataByType(newData, entry.dataType);
+        
+        // Store old version for event
+        uint256 oldVersion = entry.version;
+        
+        // Update the data
+        entry.data = newData;
+        entry.version++;
+        entry.timestamp = block.timestamp;
+        
+        // Update global storage if requested and exists
+        if (updateGlobal && bytes(globalStorage[key].key).length > 0) {
+            globalStorage[key] = entry;
+        }
+        
+        // Update user activity
+        userStats[msg.sender].lastActivity = block.timestamp;
+        
+        emit DataUpdated(msg.sender, key, oldVersion, entry.version, block.timestamp);
+    }
+
+    // ============ CONVENIENCE FUNCTIONS ============
+
+    /**
+     * @dev Store string data (convenience function)
+     * @param key Unique identifier
+     * @param value String value to store
+     * @param isGlobal Whether data should be public
+     */
+    function storeString(
+        string memory key,
+        string memory value,
+        bool isGlobal
+    ) external {
+        if (bytes(value).length > MAX_STRING_LENGTH) revert StringTooLong();
+        
+        bytes memory encodedData = abi.encode(value);
+        this.storeData(key, encodedData, DataType.STRING, isGlobal);
+    }
+
+    /**
+     * @dev Store numeric data (convenience function)
+     * @param key Unique identifier
+     * @param value Number value to store
+     * @param isGlobal Whether data should be public
+     */
+    function storeNumber(
+        string memory key,
+        uint256 value,
+        bool isGlobal
+    ) external {
+        bytes memory encodedData = abi.encode(value);
+        this.storeData(key, encodedData, DataType.NUMBER, isGlobal);
+    }
+
+    /**
+     * @dev Store boolean data (convenience function)
+     * @param key Unique identifier
+     * @param value Boolean value to store
+     * @param isGlobal Whether data should be public
+     */
+    function storeBool(
+        string memory key,
+        bool value,
+        bool isGlobal
+    ) external {
+        bytes memory encodedData = abi.encode(value);
+        this.storeData(key, encodedData, DataType.BOOLEAN, isGlobal);
+    }
+
+    // ============ RETRIEVAL CONVENIENCE FUNCTIONS ============
+
+    /**
+     * @dev Retrieve string data with automatic decoding
+     * @param owner Data owner address (address(0) for global)
+     * @param key Data identifier
+     * @return value Decoded string value
+     */
+    function getString(address owner, string memory key) external returns (string memory value) {
+        (bytes memory data, DataType dataType,,) = this.retrieveData(owner, key);
+        if (dataType != DataType.STRING) revert InvalidDataType();
+        return abi.decode(data, (string));
+    }
+
+    /**
+     * @dev Retrieve numeric data with automatic decoding
+     * @param owner Data owner address (address(0) for global)
+     * @param key Data identifier
+     * @return value Decoded numeric value
+     */
+    function getNumber(address owner, string memory key) external returns (uint256 value) {
+        (bytes memory data, DataType dataType,,) = this.retrieveData(owner, key);
+        if (dataType != DataType.NUMBER) revert InvalidDataType();
+        return abi.decode(data, (uint256));
+    }
+
+    /**
+     * @dev Retrieve boolean data with automatic decoding
+     * @param owner Data owner address (address(0) for global)
+     * @param key Data identifier
+     * @return value Decoded boolean value
+     */
+    function getBool(address owner, string memory key) external returns (bool value) {
+        (bytes memory data, DataType dataType,,) = this.retrieveData(owner, key);
+        if (dataType != DataType.BOOLEAN) revert InvalidDataType();
+        return abi.decode(data, (bool));
+    }
+
+    // ============ UTILITY FUNCTIONS ============
+
+    /**
+     * @dev Delete a data entry
+     * @param key Key to delete
+     * @param deleteGlobal Whether to also delete from global storage
+     */
+    function deleteData(
+        string memory key,
+        bool deleteGlobal
+    ) external registeredUser validKey(key) keyExistsForUser(msg.sender, key) {
+        // Mark as inactive
+        userStorage[msg.sender][key].isActive = false;
+        keyExists[msg.sender][key] = false;
+        
+        // Delete from global storage if requested
+        if (deleteGlobal && bytes(globalStorage[key].key).length > 0) {
+            delete globalStorage[key];
+        }
+        
+        // Update statistics
+        userStats[msg.sender].activeEntries--;
+        userStats[msg.sender].lastActivity = block.timestamp;
+        
+        emit DataDeleted(msg.sender, key, block.timestamp);
+    }
+
+    /**
+     * @dev Get all keys for a user
+     * @param user User address
+     * @return Array of keys owned by the user
+     */
+    function getUserKeys(address user) external view returns (string[] memory) {
+        return userKeys[user];
+    }
+
+    /**
+     * @dev Get all global keys
+     * @return Array of all global keys
+     */
+    function getGlobalKeys() external view returns (string[] memory) {
+        return globalKeys;
+    }
+
+    /**
+     * @dev Check if user has registered
+     * @param user User address to check
+     * @return Whether user is registered
+     */
+    function isUserRegistered(address user) external view returns (bool) {
+        return userStats[user].isRegistered;
+    }
+
+    // ============ INTERNAL FUNCTIONS ============
+
+    /**
+     * @dev Register a new user
+     * @param user Address to register
+     */
+    function _registerUser(address user) internal {
+        if (user == address(0)) revert InvalidAddress();
+        
+        userStats[user] = UserStats({
+            totalEntries: 0,
+            activeEntries: 0,
+            lastActivity: block.timestamp,
+            isRegistered: true
+        });
+        
+        emit UserRegistered(user, block.timestamp);
+    }
+
+    /**
+     * @dev Validate data based on its type
+     * @param data Data to validate
+     * @param dataType Expected data type
+     */
+    function _validateDataByType(bytes memory data, DataType dataType) internal view {
+        if (dataType == DataType.STRING) {
+            // Attempt to decode as string to ensure validity
+            try this._decodeString(data) returns (string memory) {
+                // Validation successful
+            } catch {
+                revert InvalidDataType();
+            }
+        } else if (dataType == DataType.NUMBER) {
+            // Attempt to decode as uint256
+            if (data.length != 32) revert InvalidDataType();
+        } else if (dataType == DataType.BOOLEAN) {
+            // Attempt to decode as boolean  
+            if (data.length != 32) revert InvalidDataType();
+        } else if (dataType == DataType.ADDRESS) {
+            // Validate address format
+            if (data.length != 32) revert InvalidDataType();
+        }
+        // BYTES type accepts any data, so no validation needed
+    }
+
+    /**
+     * @dev External function for string decoding validation
+     * @param data Encoded string data
+     * @return Decoded string
+     */
+    function _decodeString(bytes memory data) external pure returns (string memory) {
+        return abi.decode(data, (string));
+    }
+
+    /**
+     * @dev Get contract statistics
+     * @return totalUsers Total number of registered users
+     * @return totalData Total data entries across all users
+     * @return globalData Number of global data entries
+     */
+    function getContractStats() external view returns (
+        uint256 totalUsers,
+        uint256 totalData,
+        uint256 globalData
+    ) {
+        // Note: totalUsers would need additional tracking in a real implementation
+        return (0, totalEntries, globalKeys.length);
+    }
+
+    /**
+     * @dev Emergency function to pause contract (owner only)
+     */
+    function emergencyPause() external onlyOwner {
+        // Implementation would depend on specific pause requirements
+        // This is a placeholder for emergency functionality
+    }
+
+    /**
+     * @dev Receive function to accept ETH (if needed for future features)
+     */
+    receive() external payable {
+        // Contract can receive ETH for future paid storage features
+    }
+}
